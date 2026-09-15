@@ -11,9 +11,16 @@
 repo init -u https://github.com/LineageOS/android.git -b lineage-17.1
 repo sync -c -j8
 # содержимое этого репозитория кладётся ПОВЕРХ дерева по тем же путям
+# ОБЯЗАТЕЛЬНО: sdcard переведён обратно на Android.mk (FUSE-демон),
+# иначе soong соберёт апстримный sdcard и получится дубль
+rm -f system/core/sdcard/Android.bp
+
 lunch lineage_a1000-userdebug
 mka bacon
 ```
+
+Апстрим прибит к манифесту LineageOS/android `lineage-17.1`, коммит `c7b3d4b`
+(ASB 2025-03). Локальных манифестов нет.
 
 Ключи подписи (`vendor/lineage-priv`) в выкладку не входят — сгенерируйте свои.
 
