@@ -1,0 +1,90 @@
+# BoardConfig.mk — Lenovo A1000 (a1000) — sc8830/sc7731c
+# LineageOS 16.0 (Android 9). Ядро 3.10.64 переиспользуем (prebuilt), non-Treble, low-RAM (Go).
+
+DEVICE_PATH := device/lenovo/a1000
+
+# ---- Архитектура (Cortex-A7 / ARMv7-a-neon, 32-bit) ----
+TARGET_ARCH := arm
+TARGET_ARCH_VARIANT := armv7-a-neon
+TARGET_CPU_ABI := armeabi-v7a
+TARGET_CPU_ABI2 := armeabi
+TARGET_CPU_VARIANT := cortex-a7
+TARGET_CPU_SMP := true
+ARCH_ARM_HAVE_TLS_REGISTER := true
+TARGET_BOARD_PLATFORM := sc8830
+TARGET_BOOTLOADER_BOARD_NAME := sc8830
+TARGET_NO_BOOTLOADER := true
+
+# ---- Ядро (prebuilt, собранное под 3.10.64 — НЕ собираем из исходников) ----
+# Стоковое ядро вытащено из boot.img: firmware/out_kernel.bin
+TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/kernel
+BOARD_KERNEL_IMAGE_NAME := zImage
+BOARD_KERNEL_BASE := 0x00000000
+BOARD_KERNEL_PAGESIZE := 2048
+BOARD_KERNEL_OFFSET := 0x00008000
+BOARD_RAMDISK_OFFSET := 0x01000000
+BOARD_KERNEL_TAGS_OFFSET := 0x00000100
+BOARD_KERNEL_CMDLINE := console=ttyS1,115200n8
+BOARD_MKBOOTIMG_ARGS := --base $(BOARD_KERNEL_BASE) \
+    --pagesize $(BOARD_KERNEL_PAGESIZE) \
+    --kernel_offset $(BOARD_KERNEL_OFFSET) \
+    --ramdisk_offset $(BOARD_RAMDISK_OFFSET) \
+    --tags_offset $(BOARD_KERNEL_TAGS_OFFSET) \
+    --dt $(DEVICE_PATH)/prebuilt/sprd.dtb
+
+# ---- Размеры разделов (ТОЧНЫЕ, сняты с устройства по adb: /proc/partitions + by-name) ----
+# boot=mmcblk0p16, recovery=p19 (по 15360 KB); system=p17 (1228800 KB);
+# cache=p18 (153600 KB); userdata=p21 (6182912 KB).
+BOARD_BOOTIMAGE_PARTITION_SIZE := 15728640        # 15 МБ (p16)
+BOARD_RECOVERYIMAGE_PARTITION_SIZE := 15728640    # 15 МБ (p19)
+BOARD_SYSTEMIMAGE_PARTITION_SIZE := 1258291200    # 1.2 ГБ (p17) — лимит для Go-образа
+BOARD_USERDATAIMAGE_PARTITION_SIZE := 6331301888  # 5.9 ГБ (p21)
+BOARD_CACHEIMAGE_PARTITION_SIZE := 157286400      # 150 МБ (p18)
+BOARD_FLASH_BLOCK_SIZE := 131072
+TARGET_USERIMAGES_USE_EXT4 := true
+BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE := ext4
+
+# ---- Partition by-name path (из fstab.sc8830) ----
+TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/rootdir/etc/fstab.sc8830
+
+# ---- low-RAM / Android Go (1 ГБ ОЗУ) ----
+MALLOC_SVELTE := true
+TARGET_USES_MKE2FS := true
+
+# ---- GPU: Mali-400 (Utgard), userspace blob r5p0 ----
+BOARD_EGL_CFG := $(DEVICE_PATH)/configs/egl.cfg
+USE_OPENGL_RENDERER := true
+# gralloc0 + HWC1 из стока → нужны адаптеры/shim (см. vendor README)
+TARGET_USES_HWC2 := false
+BOARD_USES_GRALLOC1on0_ADAPTER := true
+
+# ---- Шим-библиотеки для блобов Android 5 (libui/libutils/libbinder C++ ABI) ----
+# Конкретные символы добавим после первой сборки по linker-ошибкам.
+TARGET_LD_SHIM_LIBS := \
+    /system/lib/hw/hwcomposer.sc8830.so|libui_shim.so \
+    /system/lib/egl/libGLES_mali.so|libui_shim.so
+
+# ---- non-Treble ----
+# Устройство запускалось на Android 5, Treble нет. Собираем монолит.
+TARGET_USES_64BIT_BINDER := false
+PRODUCT_FULL_TREBLE_OVERRIDE := false
+# BOARD_VNDK_VERSION отключён: на non-Treble он плодил vndk-sp-28 дубль libhidltransport → hwservicemanager SIGABRT (destroyed mutex) → фастбут
+# BOARD_VNDK_VERSION := current
+
+# ---- SELinux (стартуем в permissive ради первого буста, потом ужесточим) ----
+# TODO: после успешного буста перевести в enforcing и допилить sepolicy.
+BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive
+BOARD_KERNEL_CMDLINE += androidboot.hardware=sc8830
+
+# ---- Bootanimation под low-res экран ----
+TARGET_BOOTANIMATION_HALF_RES := true
+TARGET_SCREEN_HEIGHT := 800
+TARGET_SCREEN_WIDTH := 480
+
+# Допустимые имена устройства для updater-script (телефон рапортует lenovo_a1000)
+TARGET_OTA_ASSERT_DEVICE := a1000,lenovo_a1000,Lenovo_A1000,Lenovo A1000
+
+POLICYVERS := 28
+
+# ---- VINTF device manifest (объявляет keymaster/composer/allocator/health HIDL-сервисы) ----
+DEVICE_MANIFEST_FILE := device/lenovo/a1000/manifest.xml

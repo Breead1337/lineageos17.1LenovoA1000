@@ -1,0 +1,3 @@
+# A1000: procfs метится по пути (в отличие от sysfs, это ядро 3.10 умеет).
+# Переключатели I2S-линий Spreadtrum, в них пишет HAL звука.
+genfscon proc /pin_switch u:object_r:proc_a1000_pinswitch:s0

@@ -1,0 +1,19 @@
+# A1000: свои типы, нужные обеим половинам политики (plat и vendor).
+
+# Вендорные узлы /dev: трубы к сопроцессору WCN и аппаратный JPEG.
+type sprd_wcn_device, dev_type;
+type sprd_jpg_device, dev_type;
+
+# Демоны Spreadtrum (modemd, phoneserver, nvitemd, refnotify, wcnd). Лежат в
+# /system/bin, поэтому домен платформенный. В 8.1/9 они работали в домене init,
+# но init десятки под enforcing НЕ ЗАПУСКАЕТ службу без своего домена
+# (service.cpp: "has incorrect label or no domain transition"), а modemd
+# стартует по sys.boot_completed — уже после setenforce. Без домена радио бы
+# умирало на каждой загрузке.
+# Здесь, а не в private: к сокету modemd ходит вендорный hal_audio_default.
+type a1000_sprd, domain;
+type a1000_sprd_exec, exec_type, file_type, system_file_type;
+
+# Разделы модема W/WCN (образы и NV). modemd перезаливает из них модем после
+# сбоя, nvitemd пишет рабочий NV (ro.product.partitionpath, как в стоке).
+type a1000_modem_block, dev_type;

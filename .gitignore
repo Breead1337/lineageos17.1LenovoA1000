@@ -1,0 +1,7 @@
+*.pre-*
+*.bak
+*.bak[0-9]*
+*.stale
+*.orig
+*.rej
+out/

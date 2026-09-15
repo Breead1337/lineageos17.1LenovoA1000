@@ -1,0 +1,28 @@
+# A1000: метки вендорных узлов /dev. Их ставит ueventd в момент создания узла,
+# поэтому HAL видят верный тип сразу, без гонки с a1000_selabel.sh. Всё, что
+# в sysfs, метится живьём скриптом: sysfs генерирует ядро, а genfscon на этом
+# ядре не работает.
+/dev/spipe_wcn[0-9]+        u:object_r:sprd_wcn_device:s0
+/dev/slog_wcn               u:object_r:sprd_wcn_device:s0
+/dev/cpwcn                  u:object_r:sprd_wcn_device:s0
+/dev/sprd_jpg               u:object_r:sprd_jpg_device:s0
+/dev/sprd_(sensor|isp|image|scale|rotation)  u:object_r:camera_device:s0
+/dev/mali[0-9]*             u:object_r:gpu_device:s0
+/dev/sprd_gsp               u:object_r:gpu_device:s0
+# SIPC-канал к BT-части WCN; HAL Bluetooth открывает его как hci-узел.
+/dev/sttybt0                u:object_r:hci_attach_dev:s0
+# Модем W: AT-каналы, трубы NV/звука/лога.
+/dev/stty_w[0-9]+           u:object_r:radio_device:s0
+/dev/spipe_w[0-9]+          u:object_r:radio_device:s0
+/dev/slog_w                 u:object_r:radio_device:s0
+
+# Разделы по имени: ueventd метит и сам узел mmcblk0pN.
+/dev/block/platform/sdio_emmc/by-name/system    u:object_r:system_block_device:s0
+/dev/block/platform/sdio_emmc/by-name/userdata  u:object_r:userdata_block_device:s0
+/dev/block/platform/sdio_emmc/by-name/cache     u:object_r:cache_block_device:s0
+/dev/block/platform/sdio_emmc/by-name/misc      u:object_r:misc_block_device:s0
+/dev/block/platform/sdio_emmc/by-name/recovery  u:object_r:recovery_block_device:s0
+/dev/block/platform/sdio_emmc/by-name/boot      u:object_r:boot_block_device:s0
+/dev/block/platform/sdio_emmc/by-name/(wmodem|wdsp|wfixnv[12]|wruntimenv[12]|wcnmodem|wcnfixnv[12]|wcnruntimenv[12])  u:object_r:a1000_modem_block:s0
+
+/data/cg(/.*)?              u:object_r:a1000_gps_data_file:s0

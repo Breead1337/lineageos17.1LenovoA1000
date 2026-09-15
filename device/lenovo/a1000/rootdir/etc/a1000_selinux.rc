@@ -1,0 +1,31 @@
+# A1000: метки вендорным узлам + необязательный переход в enforcing.
+# Подробности и список вылеченного — в /system/bin/a1000_selabel.sh.
+#
+# ДВА ЗАПУСКА. "on boot" — чтобы метки стояли ДО старта HAL: иначе hal_power,
+# hal_light и healthd успевают ткнуться в узлы, пока те ещё с типом sysfs.
+# "on property:sys.boot_completed=1" — повтор, потому что часть узлов
+# (например /dev/mali0) появляется позже.
+#
+# ПРОВЕРЕНО И ОТКАЧЕНО: триггер "on early-boot" НЕ РАБОТАЕТ — телефон вообще
+# не грузится (24.08.2026). Скрипт заканчивается переходом в enforcing, а на
+# early-boot это происходит ДО старта class core/main, и система не поднимается.
+# Раньше "on boot" переходить в enforcing НЕЛЬЗЯ.
+#
+# ВАЖНО: init в 8.1 разбирает ВСЕ файлы в /system/etc/init, а не только *.rc.
+# Бэкапы сюда класть НЕЛЬЗЯ.
+
+service a1000_selabel /system/bin/a1000_selabel.sh
+    class late_start
+    user root
+    # Android 10: без своего домена init под enforcing службу НЕ ЗАПУСТИТ,
+    # а второй проход снимает страховочный флаг. su в userdebug permissive —
+    # ему можно chcon и setenforce без отдельных правил.
+    seclabel u:r:su:s0
+    oneshot
+    disabled
+
+on boot
+    start a1000_selabel
+
+on property:sys.boot_completed=1
+    start a1000_selabel

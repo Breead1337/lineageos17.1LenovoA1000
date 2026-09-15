@@ -1,0 +1,42 @@
+# A1000: wpa_supplicant с HIDL-интерфейсом.
+# "interface ..." — по ней init связывает процесс с ISupplicant в hwservicemanager.
+# -iwlan0 обязателен: ISupplicant.listInterfaces() строится из аргументов -i,
+# без него framework пишет "Got zero HIDL supplicant ifaces".
+# P2P (-ip2p0) НЕ добавлять: на sprdwl supplicant зависает в kernel на 99% CPU
+# и Watchdog убивает system_server.
+#
+# ПОЧЕМУ КОНФИГ В /data/vendor/wifi/wpa, А НЕ В /data/misc/wifi
+# Двоичная политика в ramdisk — от Android 9, а userspace здесь 8.1. В девятке
+# wpa_supplicant переехал на /data/vendor/wifi/wpa (тип wpa_data_file), а доступ
+# к /data/misc/wifi у домена hal_wifi_supplicant_default ОТОБРАН, причём вместе
+# с "dontaudit hal_wifi_supplicant_default wifi_data_file:dir search" — отказ не
+# попадает ни в dmesg, ни в logcat. Наружу это выглядело так: под enforcing
+#   wpa_supplicant: Failed to open config file
+#   '/data/misc/wifi/wpa_supplicant.conf', error: Permission denied
+# и Wi-Fi, однажды выключенный, больше не включался до перезагрузки (на самой
+# загрузке он успевал стартовать, пока SELinux ещё permissive).
+# Путь /data/vendor/wifi/wpa этой же политикой РАЗРЕШЁН (wpa_data_file:
+# dir/file/sock_file create_*_perms) и размечен в /vendor_file_contexts,
+# поэтому дописывать правило в политику не нужно.
+on post-fs-data
+    mkdir /data/vendor/wifi 0770 wifi wifi
+    mkdir /data/vendor/wifi/wpa 0770 wifi wifi
+    mkdir /data/vendor/wifi/wpa/sockets 0770 wifi wifi
+    # Сети хранит framework (WifiConfigStore.xml), в конфиге — только настройки
+    # самого supplicant, поэтому перезаписывать его каждую загрузку безопасно.
+    copy /system/etc/wifi/wpa_supplicant.conf /data/vendor/wifi/wpa/wpa_supplicant.conf
+    chown wifi wifi /data/vendor/wifi/wpa/wpa_supplicant.conf
+    chmod 0660 /data/vendor/wifi/wpa/wpa_supplicant.conf
+
+service wpa_supplicant /vendor/bin/hw/wpa_supplicant \
+    -iwlan0 -Dnl80211 -c/data/vendor/wifi/wpa/wpa_supplicant.conf \
+    -I/system/etc/wifi/wpa_supplicant_overlay.conf \
+    -O/data/vendor/wifi/wpa/sockets \
+    -g@android:wpa_wlan0
+    interface android.hardware.wifi.supplicant@1.0::ISupplicant default
+    class main
+    socket wpa_wlan0 dgram 660 wifi wifi
+    user root
+    group system wifi inet
+    disabled
+    oneshot

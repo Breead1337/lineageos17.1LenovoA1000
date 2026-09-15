@@ -1,0 +1,61 @@
+# A1000 / Android 10: правила для ВЕНДОРНЫХ доменов (HAL).
+# Источник тот же, что у private/a1000_plat.te: полная загрузка в permissive.
+
+type a1000_gps_data_file, file_type, data_file_type;
+type proc_a1000_pinswitch, fs_type, proc_type;
+
+# ---- камера ----
+# /dev/sprd_{sensor,isp,image,scale,rotation} = camera_device (file_contexts).
+allow hal_camera_default sprd_jpg_device:chr_file rw_file_perms;
+allow hal_camera_default sysfs:file r_file_perms;
+# Калибровка и отладка блоба: /data/misc/media/{isp.bin,sensor.file,...}.
+allow hal_camera_default media_data_file:dir rw_dir_perms;
+allow hal_camera_default media_data_file:file create_file_perms;
+allow hal_camera_default self:tcp_socket create;
+vndbinder_use(hal_camera_default)
+allow hal_camera_default hal_graphics_mapper_hwservice:hwservice_manager find;
+
+# ---- графика ----
+# /dev/mali0 и /dev/sprd_gsp = gpu_device (file_contexts).
+allow hal_graphics_allocator_default graphics_device:chr_file rw_file_perms;
+allow hal_graphics_composer_default ion_device:chr_file rw_file_perms;
+vndbinder_use(hal_graphics_composer_default)
+hal_client_domain(hal_graphics_composer_default, hal_configstore)
+hal_client_domain(hal_graphics_composer_default, hal_graphics_allocator)
+set_prop(hal_graphics_composer_default, system_prop)
+allow hal_memtrack_default debugfs:file r_file_perms;
+
+# ---- GPS: движок CellGuide пишет журналы и сокет в /data/cg ----
+allow hal_gnss_default a1000_gps_data_file:dir create_dir_perms;
+allow hal_gnss_default a1000_gps_data_file:file create_file_perms;
+allow hal_gnss_default a1000_gps_data_file:sock_file create_file_perms;
+vndbinder_use(hal_gnss_default)
+
+# ---- датчики, питание, вибро ----
+# Метки sysfs ставит a1000_selabel.sh на "on boot", а HAL успевают раньше.
+allow hal_sensors_default sysfs:dir r_dir_perms;
+allow hal_sensors_default sysfs:file rw_file_perms;
+allow hal_power_default { sysfs sysfs_devices_system_cpu }:file rw_file_perms;
+allow hal_vibrator_default sysfs:file rw_file_perms;
+
+# ---- Bluetooth ----
+# HAL открывает SIPC-канал сам, но включает BT-часть сопроцессора через wcnd
+# (абстрактный сокет @wcnd) — без этого Bluetooth не включается.
+allow hal_bluetooth_default a1000_sprd:unix_stream_socket connectto;
+allow hal_bluetooth_default bluetooth_data_file:dir search;
+
+# ---- радио и звук ----
+# rild говорит с модемом через pty, который открывает phoneserver.
+allow rild devpts:chr_file rw_file_perms;
+# HAL звука ходит к сокету modemd (звук в звонке).
+allow hal_audio_default a1000_sprd:unix_stream_socket connectto;
+# Переключатели I2S-линий: кто сейчас владеет шиной — AP, модем или BT SCO
+# (/proc/pin_switch/{iis0_sys_sel,bt_iis_sys_sel}/*). Тип — genfs_contexts.
+allow hal_audio_default proc_a1000_pinswitch:dir r_dir_perms;
+allow hal_audio_default proc_a1000_pinswitch:file rw_file_perms;
+allow hal_audio_default init:unix_stream_socket connectto;
+# Заводской режим блоба: свойства петли/дампа (media.mmi.audio.loop,
+# media.dump.switch) и дамп в /data/local/tmp. В обычной работе не нужны —
+# глушим, а не разрешаем.
+dontaudit hal_audio_default property_socket:sock_file write;
+dontaudit hal_audio_default shell_data_file:dir search;

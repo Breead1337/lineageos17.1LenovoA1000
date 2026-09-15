@@ -1,0 +1,15 @@
+# zram.rc — bring up compressed swap early, before zygote/dexopt thrash.
+# Installed to /system/etc/init/zram.rc. Pairs with /system/bin/zram_setup.sh.
+# Android 9 does not auto-enable zram from ro.config.zram and the fstab has no
+# swap line, so we set it up explicitly here.
+
+service zram_setup /system/bin/sh /system/bin/zram_setup.sh
+    user root
+    # Скрипт шелла без своего домена: init десятки под enforcing такую
+    # службу не запускает. su (permissive в userdebug) — как у a1000_selabel.
+    seclabel u:r:su:s0
+    group root
+    oneshot
+
+on post-fs
+    start zram_setup

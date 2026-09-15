@@ -1,0 +1,211 @@
+/*
+ * libsprdshim_ioctl.c — SPRD GSP fixups for Android 9 on the A1000 (otm8019a).
+ *
+ *  (1) GEOMETRY: the A5 blob programs the GSP dst pixel format = RGB888 (24bpp)
+ *      while DISPC scans the DisplayPlane as 32bpp -> row shear. Fix: rewrite
+ *      src/dst RGB888 -> ARGB888 (32bpp).
+ *  (2) COLOR: the panel scans out RGBA with channels cyclically rotated (teal
+ *      looks magenta). GSP rgb_swap is ignored, so we rotate the source pixels
+ *      [R,G,B] -> [G,B,R] before GSP reads them; the panel's own BRG mapping
+ *      then yields the true R,G,B.
+ *
+ *  IDEMPOTENCY (colour) — GSP rescans ~30fps and re-presents the SAME buffer
+ *  when content is static, so a blind per-call rotate re-rotates already-rotated
+ *  bytes and drifts teal->magenta. Diagnostics showed the composer reuses a
+ *  small, STABLE set of buffer fds (e.g. 17/19/22/24/26) — they are not dup'd
+ *  per frame. So we key per-fd: store the hash of what we last LEFT in each fd;
+ *  on the next present of that fd, if the content still hashes to that value it
+ *  is unchanged (already rotated) -> skip, else it is a new frame -> rotate once
+ *  and remember the new output hash. This is exact per buffer: no cross-buffer
+ *  false positives (which a shared hash set can cause -> a fresh post-resume
+ *  frame wrongly skipped -> un-rotated -> the white-screen-after-display-off
+ *  symptom), and correct for any number of ping-ponging buffers.
+ *
+ *  We map FRESH every present (no fd->mapping cache): a cached mapping can go
+ *  stale when the composer recycles an fd to a different buffer.
+ *
+ *  Both GSP source layers (L0+L1) are handled; the system phase composes two.
+ *
+ *  PERFORMANCE — NEON throughout (16 px/iter). A static layer does only a
+ *  read-only hash pass and skips the read-modify-write rotate.
+ *
+ *  DIAGNOSTICS — if /data/gsp_shimlog_on exists, per-layer geometry+hash+decision
+ *  is logged to /data/gsp_shim.log as a ROLLING window (last LOG_CAP lines), so
+ *  late events (display off/on) survive the long first boot. No flag -> no log.
+ *
+ * Interposes libc ioctl() via LD_PRELOAD into the composer@2.1 service.
+ */
+#define _GNU_SOURCE
+#include <stdint.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <dlfcn.h>
+#include <sys/mman.h>
+#include <arm_neon.h>
+
+#define IOC_NR(x)   ((unsigned)(x) & 0xff)
+#define IOC_TYPE(x) (((unsigned)(x) >> 8) & 0xff)
+#define GSP_IO_MAGIC 'G'
+#define GSP_FMT_ARGB888 0
+#define GSP_FMT_RGB888  1
+
+typedef struct { uint32_t addr_y, addr_uv, addr_v; } GSP_DATA_ADDR_T;
+typedef struct { uint16_t st_x, st_y, rect_w, rect_h; } GSP_RECT_T;
+typedef struct { uint16_t pos_pt_x, pos_pt_y; } GSP_POS_PT_T;
+typedef struct { uint8_t b_val, g_val, r_val, a_val; } GSP_RGB_T;
+typedef struct { int e0,e1,e2,e3,e4,e5,rgb_swap_mode,a_swap_mode; } GSP_ENDIAN_INFO_PARAM_T;
+typedef struct { uint8_t is_pa; int32_t share_fd; uint32_t uv_offset, v_offset; } GSP_MEM_INFO;
+typedef struct { uint8_t dithering_en, gsp_gap, gsp_clock, ahb_clock, split_pages, y2r_opt; } GSP_MISC_CONFIG_INFO_T;
+typedef struct {
+    GSP_DATA_ADDR_T src_addr; uint32_t pitch; GSP_RECT_T clip_rect; GSP_RECT_T des_rect;
+    GSP_RGB_T grey; GSP_RGB_T colorkey; GSP_ENDIAN_INFO_PARAM_T endian_mode;
+    int img_format; int rot_angle; GSP_MEM_INFO mem_info;
+    uint8_t row_tap_mode, col_tap_mode, alpha, colorkey_en, pallet_en, scaling_en, layer_en, pmargb_en, pmargb_mod;
+} GSP_LAYER0_CONFIG_INFO_T;
+typedef struct {
+    GSP_DATA_ADDR_T src_addr; uint32_t pitch; GSP_RECT_T clip_rect; GSP_POS_PT_T des_pos;
+    GSP_RGB_T grey; GSP_RGB_T colorkey; GSP_ENDIAN_INFO_PARAM_T endian_mode;
+    int img_format; int rot_angle; GSP_MEM_INFO mem_info;
+    uint8_t row_tap_mode, col_tap_mode, alpha, colorkey_en, pallet_en, layer_en, pmargb_en, pmargb_mod;
+} GSP_LAYER1_CONFIG_INFO_T;
+typedef struct {
+    GSP_DATA_ADDR_T src_addr; uint32_t pitch; GSP_ENDIAN_INFO_PARAM_T endian_mode;
+    int img_format; GSP_MEM_INFO mem_info; uint8_t compress_r8_en;
+} GSP_LAYER_DES_CONFIG_INFO_T;
+typedef struct {
+    GSP_MISC_CONFIG_INFO_T misc_info; GSP_LAYER0_CONFIG_INFO_T layer0_info;
+    GSP_LAYER1_CONFIG_INFO_T layer1_info; GSP_LAYER_DES_CONFIG_INFO_T layer_des_info;
+} GSP_CONFIG_INFO_T;
+
+static int (*real_ioctl)(int, int, void*) = 0;
+
+/* NEON pass. do_rotate=0: hash current; 1: rotate [R,G,B,A]->[G,B,R,A] in place
+ * AND hash result. Hash over de-interleaved planes by slot, so hash(rotated)
+ * this frame == hash(current) when that buffer is later re-presented unchanged. */
+static uint32_t process(uint8_t *b, unsigned npix, int do_rotate)
+{
+    const uint32x4_t C  = vdupq_n_u32(2654435761u);
+    const uint32x4_t K0 = vdupq_n_u32(0x9E3779B1u);
+    const uint32x4_t K1 = vdupq_n_u32(0x85EBCA77u);
+    const uint32x4_t K2 = vdupq_n_u32(0xC2B2AE3Du);
+    const uint32x4_t K3 = vdupq_n_u32(0x27D4EB2Fu);
+    uint32x4_t acc = vdupq_n_u32(0);
+    unsigned i = 0;
+    for (; i + 16 <= npix; i += 16, b += 64) {
+        uint8x16x4_t px = vld4q_u8(b);     /* val0=R val1=G val2=B val3=A */
+        uint8x16x4_t s = px;
+        if (do_rotate) {
+            uint8x16x4_t out;
+            out.val[0] = px.val[1];
+            out.val[1] = px.val[2];
+            out.val[2] = px.val[0];
+            out.val[3] = px.val[3];
+            vst4q_u8(b, out);
+            s = out;
+        }
+        uint32x4_t w0 = vreinterpretq_u32_u8(s.val[0]);
+        uint32x4_t w1 = vreinterpretq_u32_u8(s.val[1]);
+        uint32x4_t w2 = vreinterpretq_u32_u8(s.val[2]);
+        uint32x4_t w3 = vreinterpretq_u32_u8(s.val[3]);
+        acc = vaddq_u32(vmulq_u32(acc, C), vmulq_u32(w0, K0));
+        acc = vaddq_u32(acc, vmulq_u32(w1, K1));
+        acc = vaddq_u32(acc, vmulq_u32(w2, K2));
+        acc = vaddq_u32(acc, vmulq_u32(w3, K3));
+    }
+    uint32_t h = vgetq_lane_u32(acc, 0) * 1u
+               + vgetq_lane_u32(acc, 1) * 2246822519u
+               + vgetq_lane_u32(acc, 2) * 3266489917u
+               + vgetq_lane_u32(acc, 3) * 668265263u;
+    for (; i < npix; i++, b += 4) {
+        uint32_t *p = (uint32_t *)b;
+        uint32_t v = *p;
+        if (do_rotate) { v = (v & 0xFF000000u) | ((v & 0x00FFFF00u) >> 8) | ((v & 0x000000FFu) << 16); *p = v; }
+        h = h * 2654435761u + v;
+    }
+    return h;
+}
+
+/* per-fd "last hash we left" map (buffer fds are few and stable) */
+#define FDMAP 24
+static struct { int fd; uint32_t hash; } g_fd[FDMAP];
+static int g_fdrr = 0;
+static uint32_t *fd_slot(int fd)
+{
+    int i, freei = -1;
+    for (i = 0; i < FDMAP; i++) {
+        if (g_fd[i].fd == fd) return &g_fd[i].hash;
+        if (freei < 0 && g_fd[i].fd == 0) freei = i;
+    }
+    if (freei < 0) { freei = g_fdrr; g_fdrr = (g_fdrr + 1) % FDMAP; }  /* evict round-robin */
+    g_fd[freei].fd = fd; g_fd[freei].hash = 0;
+    return &g_fd[freei].hash;
+}
+
+/* rolling diagnostic log gated by /data/gsp_shimlog_on */
+static int g_logfd = -1;     /* -1 unknown, 0 off, >0 fd */
+static int g_logn = 0;
+#define LOG_CAP 4000
+static void log_init(void){
+    if (g_logfd != -1) return;
+    g_logfd = (access("/data/gsp_shimlog_on", F_OK) == 0)
+              ? open("/data/gsp_shim.log", O_WRONLY|O_CREAT|O_TRUNC, 0666) : 0;
+}
+static void log_layer(const char *tag, const GSP_MEM_INFO *mi, uint32_t pitch,
+                      GSP_RECT_T clip, int fmt, uint32_t h, int rot){
+    if (g_logfd <= 0) return;
+    if (g_logn >= LOG_CAP) { lseek(g_logfd, 0, SEEK_SET); ftruncate(g_logfd, 0); g_logn = 0; }
+    char buf[200];
+    int n = snprintf(buf, sizeof buf,
+        "%s fd=%d pa=%d uvo=%x p=%u clip=%u,%u,%u,%u fmt=%d h=%08x %s\n",
+        tag, mi->share_fd, mi->is_pa, mi->uv_offset, pitch,
+        clip.st_x, clip.st_y, clip.rect_w, clip.rect_h, fmt, h, rot ? "ROT" : "skip");
+    if (n > 0) { write(g_logfd, buf, (size_t)n); g_logn++; }
+}
+
+/* rotate one source layer once per new frame (idempotent, keyed per fd) */
+static void handle_layer(const char *tag, GSP_MEM_INFO *mi, uint32_t pitch,
+                         GSP_RECT_T clip, int fmt, uint8_t layer_en)
+{
+    if (!layer_en || mi->share_fd <= 0 || !pitch || !clip.rect_h) return;
+    unsigned npix = (unsigned)pitch * clip.rect_h;
+    size_t len = (size_t)npix * 4;
+    void *m = mmap(0, len, PROT_READ | PROT_WRITE, MAP_SHARED, mi->share_fd, 0);
+    if (m == MAP_FAILED) return;
+    uint32_t *slot = fd_slot(mi->share_fd);
+    uint32_t h = process((uint8_t *)m, npix, 0);   /* hash current content */
+    int rot = 0;
+    if (*slot != h) {                              /* changed since we left it -> rotate once */
+        *slot = process((uint8_t *)m, npix, 1);    /* store hash of rotated output */
+        rot = 1;
+    }
+    munmap(m, len);
+    log_layer(tag, mi, pitch, clip, fmt, h, rot);
+}
+
+int ioctl(int fd, int request, ...)
+{
+    va_list ap; va_start(ap, request);
+    void *arg = va_arg(ap, void*);
+    va_end(ap);
+    if (!real_ioctl)
+        real_ioctl = (int (*)(int, int, void*))dlsym(RTLD_NEXT, "ioctl");
+
+    if (arg && IOC_TYPE(request) == GSP_IO_MAGIC && IOC_NR(request) == 0) {
+        GSP_CONFIG_INFO_T *c = (GSP_CONFIG_INFO_T *)arg;
+        GSP_LAYER0_CONFIG_INFO_T *l0 = &c->layer0_info;
+        GSP_LAYER1_CONFIG_INFO_T *l1 = &c->layer1_info;
+        log_init();
+        /* (1) geometry: 32bpp on all layers to match DISPC scanout */
+        if (l0->img_format == GSP_FMT_RGB888) l0->img_format = GSP_FMT_ARGB888;
+        if (l1->img_format == GSP_FMT_RGB888) l1->img_format = GSP_FMT_ARGB888;
+        if (c->layer_des_info.img_format == GSP_FMT_RGB888) c->layer_des_info.img_format = GSP_FMT_ARGB888;
+        /* (2) color: rotate each enabled source layer once per new frame */
+        handle_layer("L0", &l0->mem_info, l0->pitch, l0->clip_rect, l0->img_format, l0->layer_en);
+        handle_layer("L1", &l1->mem_info, l1->pitch, l1->clip_rect, l1->img_format, l1->layer_en);
+    }
+    return real_ioctl ? real_ioctl(fd, request, arg) : -1;
+}

@@ -1,0 +1,49 @@
+# A1000: отладка по adb без подтверждения ключа — как на рабочем устройстве.
+ro.adb.secure=0
+
+# Постоянный логкат выключен — как на рабочем устройстве.
+# Пустое значение можно задать только здесь: в списке make оно
+# склеивается со следующим свойством.
+persist.logd.logpersistd=
+
+# A1000: ядро 3.10 не умеет асинхронный ввод-вывод в functionfs
+# («AIO on FFS not supported»), и adbd не поднимает USB-транспорт вовсе.
+# У adbd есть штатный синхронный путь, включается этим свойством.
+sys.usb.ffs.aio_compat=true
+
+# adbd десятки по умолчанию идёт неблокирующим путём functionfs (usb.cpp) и на
+# ядре 3.10 сразу умирает: «AIO on FFS not supported». Свойство aio_compat выше
+# читает ТОЛЬКО legacy-путь (usb_legacy.cpp), поэтому одного его мало —
+# выключаем неблокирующий путь, иначе до legacy дело не доходит.
+ro.adb.nonblocking_ffs=false
+
+# BluetoothAddress::get_local_address() берёт адрес только из файла по
+# ro.bt.bdaddr_path, ro.boot.btmacaddr или persist.service.bdroid.bdaddr.
+# Файла нет, ro.boot.* задаются из cmdline ядра, а загрузчик SC8830 её
+# выбрасывает — HAL падал по кругу с «Open: No Bluetooth Address!».
+# Адрес тот же, что вендорная libbt-vendor.so читает из
+# /productinfo/connectivity_configure.ini (device_addr = 17,255,0,34,45,174).
+ro.boot.btmacaddr=11:ff:00:22:2d:ae
+
+# Codec2 (media.swcodec) на этом железе падает в SIGBUS BUS_ADRALN:
+#   C2SoftVorbisDec::process ... fault addr 0xb6b5a05d
+# Линейные буферы Codec2 берутся из ION, а он тут НЕкешированный
+# (см. память a1000-uncached-ion-is-the-root), и невыровненный доступ к такой
+# памяти архитектурой не обещан. /proc/cpu/alignment=2 доводит не всё: в
+# статистике ядра часть попыток идёт в Skipped. Уводим MediaCodec на старый
+# путь OMX — программные OMX.google.* кодеки на месте
+# (/system/lib/libstagefright_soft_*.so + media_codecs_google_audio.xml) и
+# работают с обычной памятью.
+# ponytail: обход на уровне свойства; настоящее лечение -- кешируемая ION-куча
+# в ядре, это правка sprd ion heap.
+debug.stagefright.ccodec=0
+
+# A1000: стоковый HAL звука валится в set_master_mute (SIGSEGV),
+# а AudioFlinger зовёт её при старте. См. firmware/_los17_audio.py.
+ro.audio.master_mute_broken=1
+
+# A1000: пути к разделам модема для modemd (перезаливка после сбоя) и nvitemd
+# (рабочий NV), как в стоке. Без него NV писался на rootfs и терялся.
+ro.product.partitionpath=/dev/block/platform/sdio_emmc/by-name/
+# A1000: слот по умолчанию, как в стоке (читает libreference-ril_sp)
+persist.msms.phone_default=0

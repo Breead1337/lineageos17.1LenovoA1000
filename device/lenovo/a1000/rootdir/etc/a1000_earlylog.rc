@@ -1,0 +1,49 @@
+# A1000 / Android 10: журнал загрузки, переживающий потерю питания.
+#
+# Зависание не перезагружает аппарат, а батарею при выходе дёргают — ramoops в
+# таком случае пуст, его память гибнет вместе с питанием. Поэтому пишем
+# кернел-лог в СЫРОЙ раздел cache: он на диске и переживает что угодно.
+# Читаем потом из TWRP: dd if=/dev/block/mmcblk0p19 | strings
+#
+# Терять нечего: cache и так пуст. /dev/kmsg отдаёт кольцевой буфер С НАЧАЛА
+# загрузки, поэтому поздний старт ничего не съедает — но нам важно стартовать
+# КАК МОЖНО РАНЬШЕ, потому что падение может случиться до триггера класса:
+# первая версия висела на "class core" и на ядре #112 не успела запуститься.
+# Отсюда явный старт по "on init" и никакого seclabel (домена su в политике
+# может не быть, а грузимся мы всё равно permissive).
+#
+# ВАЖНО: раз мы затираем cache, в fstab.sc8830 у /cache обязан стоять nofail,
+# иначе fs_mgr_mount_all вернёт FAIL, init не поставит ro.crypto.state и
+# zygote не запустится вовсе — см. _los17_fstab_nofail.py.
+
+service a1000_earlylog /system/bin/sh -c "cat /dev/kmsg > /dev/block/mmcblk0p19"
+    user root
+    group root system log
+    disabled
+
+# Кернел-лог не показывает, ЧТО именно ответил gralloc или SurfaceFlinger.
+# /data теперь монтируется и переживает перезагрузку — пишем logcat туда.
+service a1000_logcat /system/bin/logcat -b all -v threadtime -f /data/bootlog.txt
+    user root
+    group root system log
+    disabled
+
+# Пока загрузка не доходит до конца, аппарат приходится вынимать из зависания
+# руками. Ждём и, если sys.boot_completed так и не выставлен, сами уходим в
+# recovery — оттуда журналы забираются по adb без участия человека.
+# СНЯТЬ, когда система начнёт загружаться.
+service a1000_autorec /system/bin/sh -c "sleep 420; sync; getprop sys.boot_completed | grep -q 1 || /system/bin/reboot recovery"
+    user root
+    group root system
+    oneshot
+    disabled
+
+on init
+    start a1000_earlylog
+
+on post-fs
+    start a1000_earlylog
+
+on post-fs-data
+    start a1000_logcat
+    start a1000_autorec

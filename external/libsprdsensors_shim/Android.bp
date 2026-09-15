@@ -1,0 +1,8 @@
+cc_library_shared {
+    name: "libsprdsensors_shim",
+    srcs: ["sensors_shim.c"],
+    shared_libs: ["liblog"],
+    cflags: ["-Wno-error"],
+    compile_multilib: "32",
+    vendor_available: true,
+}

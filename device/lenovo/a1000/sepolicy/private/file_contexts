@@ -1,0 +1,6 @@
+# A1000: демоны Spreadtrum — свой домен a1000_sprd (см. public/a1000_types.te).
+/system/bin/modemd          u:object_r:a1000_sprd_exec:s0
+/system/bin/phoneserver     u:object_r:a1000_sprd_exec:s0
+/system/bin/nvitemd         u:object_r:a1000_sprd_exec:s0
+/system/bin/refnotify       u:object_r:a1000_sprd_exec:s0
+/system/bin/wcnd            u:object_r:a1000_sprd_exec:s0

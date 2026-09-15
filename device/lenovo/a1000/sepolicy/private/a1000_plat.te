@@ -1,0 +1,122 @@
+# A1000 / Android 10: правила для ПЛАТФОРМЕННЫХ доменов.
+# Сведено из полной загрузки в permissive (logcat, dmesg, сырой kmsg в cache,
+# pstore режима зарядки): каждое правило — реальный отказ, а не догадка.
+# Узлы /dev метит ueventd по vendor/file_contexts; sysfs — a1000_selabel.sh.
+# Сборка идёт с SELINUX_IGNORE_NEVERALLOWS (userdebug): многие из этих прав
+# базовая политика запрещает вендорам Treble, а у нас Treble нет.
+
+# ---- демоны Spreadtrum: modemd, phoneserver, nvitemd, refnotify, wcnd ----
+typeattribute a1000_sprd coredomain;
+typeattribute a1000_sprd mlstrustedsubject;
+init_daemon_domain(a1000_sprd)
+# Первые загрузки домен был permissive (сбор отказов), 13.09 снят: три загрузки
+# с Wi-Fi — ни одного отказа. Звонок/SMS не проверены (сеть не регистрируется
+# из-за SIM, как и на 9) — если сломаются: dmesg | grep a1000_sprd.
+
+# Всё ниже — то, что они просили, ещё работая в домене init.
+allow a1000_sprd self:global_capability2_class_set block_suspend;
+allow a1000_sprd { radio_device sprd_wcn_device }:chr_file rw_file_perms;
+allow a1000_sprd devpts:chr_file { rw_file_perms setattr };
+# phoneserver держит пробуждения и ходит к system_suspend по HIDL.
+hwbinder_use(a1000_sprd)
+wakelock_use(a1000_sprd)
+# refnotify и wcnd запускают соседние бинарники.
+allow a1000_sprd system_file:file execute_no_trans;
+# nvitemd/modemd: разделы модема по ro.product.partitionpath (как в стоке).
+# Раньше пути не было — NV писался в /wruntimenv{1,2} на rootfs и терялся,
+# а modemd не мог перезалить модем после сбоя («get partitionpath fail»).
+allow a1000_sprd a1000_modem_block:blk_file rw_file_perms;
+allow a1000_sprd block_device:dir search;
+allow a1000_sprd block_device:lnk_file read;
+allow a1000_sprd rootfs:file rw_file_perms;
+allow a1000_sprd sysfs:file rw_file_perms;
+# Второй круг — первая загрузка под enforcing (домен ещё permissive):
+allow a1000_sprd self:global_capability_class_set { dac_override setuid };
+# phoneserver кладёт /dev/CHNPTYW0 -> /dev/pts/N, по нему rild находит модем.
+allow a1000_sprd device:dir { add_name remove_name write };
+allow a1000_sprd device:lnk_file { create unlink };
+# Сторожевые прерывания сопроцессоров: /proc/cpw/wdtirq, /proc/cpwcn/wdtirq.
+allow a1000_sprd proc:file rw_file_perms;
+allow a1000_sprd proc_net:file r_file_perms;
+# wcnd читает MAC Wi-Fi из /data/misc/wifi/wifimac.txt.
+allow a1000_sprd wifi_data_file:dir search;
+allow a1000_sprd wifi_data_file:file r_file_perms;
+unix_socket_connect(a1000_sprd, property, init)
+
+# ---- init ----
+# Свои init-скрипты пишут в sysfs (губернатор, USB, спящий режим) и в /proc.
+allow init { sysfs sysfs_devices_system_cpu }:file { open setattr write };
+allow init proc:file { setattr write };
+allow init self:global_capability_class_set { sys_module sys_ptrace };
+allow init oemfs:dir mounton;
+allow init tmpfs:lnk_file create;
+# atrace.rc создаёт экземпляр трассировки wifi.
+allow init debugfs:dir { add_name create write };
+allow init debugfs:file write;
+
+# ---- /dev/stune ----
+# В ядре 3.10 нет schedtune: /dev/stune — простой tmpfs с меткой device, а
+# файлы tasks там обычные. set_sched_policy() пишет в них из КАЖДОГО процесса,
+# и zygote десятки считает отказ ФАТАЛЬНЫМ для запуска приложения.
+allow domain device:file { getattr open write };
+
+# ---- приложения ----
+# JIT ART на ядре с бэкпортом memfd_create (#113) открывает второй вид кода
+# через /proc/self/fd — на родном memfd этого open нет, и правила тоже.
+allow appdomain appdomain_tmpfs:file open;
+# Signal Catcher ART снимает свой же стек при ANR.
+allow appdomain self:process ptrace;
+allow priv_app sysfs:file r_file_perms;
+allow platform_app sysfs:dir r_dir_perms;
+
+# ---- системные службы ----
+# zygote открывает trace_marker ещё в permissive (setenforce у нас на "on boot",
+# а zygote стартует раньше), а при форке system_server делает fstat на каждый
+# свой дескриптор и переоткрывает его в потомке. Без getattr/open —
+# "Unable to stat 4" -> SIGABRT zygote на КАЖДОЙ загрузке, +10 с к старту и
+# перезапуск audioserver/netd/wificond. Отказ был не виден: его глушил
+# dontaudit на debugfs ниже.
+allow zygote debugfs:file { getattr open write };
+allow zygote sysfs:dir r_dir_perms;
+# zygote проверяет, нельзя ли писать образ ART в /system/framework; корень ro.
+dontaudit zygote system_file:{ dir file } write;
+# /dev/graphics/fb0 открывает наш libui_shim: он в DT_NEEDED у gralloc и
+# поэтому грузится в КАЖДЫЙ процесс с графикой, а нужен только композеру.
+# Приложениям кадровый буфер не даём (это чтение экрана); шим отказ переживает.
+dontaudit { appdomain system_server } graphics_device:dir search;
+allow system_server crash_dump:process getpgid;
+# /proc/wakelocks метку не принимает: procfs не хранит xattr.
+dontaudit system_server proc:file { getattr open read };
+allow system_suspend sysfs:file rw_file_perms;
+allow healthd sysfs:file r_file_perms;
+allow charger sysfs:file rw_file_perms;
+allow charger device:dir r_dir_perms;
+allow lmkd sysfs:file { open write };
+allow storaged { sysfs debugfs }:file r_file_perms;
+allow ueventd self:global_capability_class_set sys_nice;
+dontaudit netd self:global_capability_class_set sys_module;
+# /oem — остаток старого раздела с метками cache; zygote ищет там оверлеи.
+allow zygote cache_file:dir search;
+# e2fsck проверяет prodnv (/productinfo) на каждой загрузке.
+allow fsck block_device:blk_file rw_file_perms;
+allow vold hal_bootctl_hwservice:hwservice_manager find;
+allow wificond wifi_data_file:dir search;
+# swapon_all зовёт mkswap (toybox) на zram.
+allow toolbox ram_device:blk_file rw_file_perms;
+# crash_dump и flags_health_check перебирают ВСЕ свойства.
+allow { crash_dump flags_health_check } property_type:file r_file_perms;
+allow crash_dump runtime_event_log_tags_file:file getattr;
+
+# ---- шум ----
+# Ядро 3.10 на каждом exec просит модуль personality-8, которого нет и не будет.
+dontaudit domain kernel:system module_request;
+# trace_marker: в этом ядре debugfs не делится на типы, трассировка не нужна.
+dontaudit domain debugfs:file { getattr open read write };
+
+# modemd после сбоя модема (assert/wdtirq) перезаливает его и сам делает
+# ctl.stop/ctl.start phoneserver_w, wril-daemon*, nvitemd_w. Без этого стек
+# RIL оставался на старом модеме, /dev/stty_w0 занят -> AT+SMMSWAP=0 EBUSY.
+set_prop(a1000_sprd, ctl_default_prop)
+# ищет процессы телефона по /proc — не нужно, шум.
+dontaudit a1000_sprd self:global_capability_class_set sys_ptrace;
+dontaudit a1000_sprd domain:file read;
