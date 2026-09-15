@@ -48,7 +48,10 @@ mka bacon
 | `packages/apps/Trebuchet/` | ОЗУ в «недавних» |
 | `packages/apps/FMRadio/`, `packages/inputmethods/LatinIME/` | правки под SC8830 |
 | `vendor/lineage/charger/` | картинки экрана зарядки |
+| `kernel/` | дельта исходников ядра 3.10 под десятку (26 файлов) + скрипты сборки, см. `kernel/README.md` |
+| `prebuilt/boot/` | собранные boot.img (ядра #106/#114/#115) и Image #106 |
 | `tools/` | скрипты, которыми накатывались все правки (`_los17_*.py`), сборка ядра (`_los17_kernel_a10.sh`), инжектор политики SELinux, разбор/пересборка boot.img |
 
-Исходники ядра 3.10 — <https://github.com/Breead1337/lenovoa1000kernel3.10sourceENHANCED>.
+База исходников ядра 3.10 — <https://github.com/Breead1337/lenovoa1000kernel3.10sourceENHANCED>;
+правки под десятку лежат здесь, в `kernel/`.
 Порт LineageOS 15.1 для этого же аппарата — <https://github.com/Breead1337/lineageos15.1LenovoA1000>.
